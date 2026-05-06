@@ -1,0 +1,318 @@
+// =====================================================
+// DVSM NETWORK PROTOCOL LAYER (NPL)
+// Gossip • HotStuff Phases • Quorum Consensus • Fault Recovery
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - NODE STATE
+// =====================================================
+
+public struct DVSMProtocolNode: Sendable {
+    public let nodeID: String
+    public let publicKey: Data
+    public let currentEpoch: UInt64
+    public let shardID: String
+}
+
+// =====================================================
+// MARK: - PROTOCOL MESSAGE TYPES
+// =====================================================
+
+public enum DVSMProtocolMessageType: Sendable {
+    case proposal
+    case vote
+    case preCommit
+    case commit
+    case finalize
+    case viewChange
+}
+
+// =====================================================
+// MARK: - PROTOCOL MESSAGE (CORE NETWORK UNIT)
+// =====================================================
+
+public struct DVSMProtocolMessage: Sendable {
+    public let type: DVSMProtocolMessageType
+    public let epoch: UInt64
+    public let shardID: String
+    public let payload: Data
+    public let sender: String
+    public let signature: Data?   // future BLS / Ed25519 hook
+}
+
+// =====================================================
+// MARK: - QUORUM CERTIFICATE (EXTENDED HOTSTUFF MODEL)
+// =====================================================
+
+public struct DVSMQuorumCertificate: Sendable {
+    public let epoch: UInt64
+    public let shardID: String
+    public let blockRoot: String
+    public let aggregatedSignature: Data? // BLS aggregation hook
+    public let signers: [String]
+}
+
+// =====================================================
+// MARK: - GOSSIP TRANSPORT LAYER
+// =====================================================
+
+public protocol DVSMGossipTransport: Sendable {
+    func broadcast(_ message: DVSMProtocolMessage) async
+    func receive() async -> DVSMProtocolMessage?
+}
+
+// -----------------------------------------------------
+// IN-MEMORY DEV TRANSPORT (NOT PRODUCTION)
+// -----------------------------------------------------
+
+public actor DVSMInMemoryGossip: DVSMGossipTransport {
+
+    private var buffer: [DVSMProtocolMessage] = []
+
+    public init() {}
+
+    public func broadcast(_ message: DVSMProtocolMessage) async {
+        buffer.append(message)
+    }
+
+    public func receive() async -> DVSMProtocolMessage? {
+        guard !buffer.isEmpty else { return nil }
+        return buffer.removeFirst()
+    }
+}
+
+// =====================================================
+// MARK: - HOTSTUFF-STYLE CONSENSUS PHASE ENGINE
+// =====================================================
+
+public actor DVSMHotStuffEngine {
+
+    public init() {}
+
+    // Phase 1: Proposal
+    public func propose(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        sender: String
+    ) -> DVSMProtocolMessage {
+
+        DVSMProtocolMessage(
+            type: .proposal,
+            epoch: epoch,
+            shardID: shardID,
+            payload: Data(root.utf8),
+            sender: sender,
+            signature: nil
+        )
+    }
+
+    // Phase 2: Vote
+    public func vote(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        sender: String
+    ) -> DVSMProtocolMessage {
+
+        DVSMProtocolMessage(
+            type: .vote,
+            epoch: epoch,
+            shardID: shardID,
+            payload: Data(root.utf8),
+            sender: sender,
+            signature: nil
+        )
+    }
+
+    // Phase 3: PreCommit
+    public func preCommit(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        sender: String
+    ) -> DVSMProtocolMessage {
+
+        DVSMProtocolMessage(
+            type: .preCommit,
+            epoch: epoch,
+            shardID: shardID,
+            payload: Data(root.utf8),
+            sender: sender,
+            signature: nil
+        )
+    }
+
+    // Phase 4: Commit
+    public func commit(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        sender: String
+    ) -> DVSMProtocolMessage {
+
+        DVSMProtocolMessage(
+            type: .commit,
+            epoch: epoch,
+            shardID: shardID,
+            payload: Data(root.utf8),
+            sender: sender,
+            signature: nil
+        )
+    }
+
+    // Phase 5: Finalize
+    public func finalize(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        sender: String
+    ) -> DVSMProtocolMessage {
+
+        DVSMProtocolMessage(
+            type: .finalize,
+            epoch: epoch,
+            shardID: shardID,
+            payload: Data(root.utf8),
+            sender: sender,
+            signature: nil
+        )
+    }
+}
+
+// =====================================================
+// MARK: - VIEW CHANGE / FAULT RECOVERY LAYER
+// =====================================================
+
+public struct DVSMViewChange: Sendable {
+    public let epoch: UInt64
+    public let shardID: String
+    public let newLeader: String
+}
+
+// =====================================================
+// MARK: - QUORUM AGGREGATION ENGINE (BLS HOOK POINT)
+// =====================================================
+
+public struct DVSMQuorumAggregator {
+
+    public init() {}
+
+    public func aggregate(
+        epoch: UInt64,
+        shardID: String,
+        signers: [String],
+        root: String
+    ) -> DVSMQuorumCertificate {
+
+        DVSMQuorumCertificate(
+            epoch: epoch,
+            shardID: shardID,
+            blockRoot: root,
+            aggregatedSignature: nil, // BLS threshold signature hook
+            signers: signers
+        )
+    }
+}
+
+// =====================================================
+// MARK: - NETWORK PROTOCOL ENGINE (CORE ORCHESTRATOR)
+// =====================================================
+
+public actor DVSMNetworkProtocolEngine {
+
+    private let transport: DVSMGossipTransport
+    private let hotStuff: DVSMHotStuffEngine
+    private let aggregator: DVSMQuorumAggregator
+
+    public init(
+        transport: DVSMGossipTransport,
+        hotStuff: DVSMHotStuffEngine,
+        aggregator: DVSMQuorumAggregator
+    ) {
+        self.transport = transport
+        self.hotStuff = hotStuff
+        self.aggregator = aggregator
+    }
+
+    // -------------------------------------------------
+    // MARK: PROPOSAL FLOW
+    // -------------------------------------------------
+
+    public func propose(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        sender: String
+    ) async {
+
+        let msg = hotStuff.propose(
+            root: root,
+            epoch: epoch,
+            shardID: shardID,
+            sender: sender
+        )
+
+        await transport.broadcast(msg)
+    }
+
+    // -------------------------------------------------
+    // MARK: VOTING FLOW
+    // -------------------------------------------------
+
+    public func vote(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        sender: String
+    ) async {
+
+        let msg = hotStuff.vote(
+            root: root,
+            epoch: epoch,
+            shardID: shardID,
+            sender: sender
+        )
+
+        await transport.broadcast(msg)
+    }
+
+    // -------------------------------------------------
+    // MARK: CONSENSUS FINALIZATION
+    // -------------------------------------------------
+
+    public func finalize(
+        root: String,
+        epoch: UInt64,
+        shardID: String,
+        signers: [String]
+    ) async -> DVSMQuorumCertificate {
+
+        let msg = hotStuff.finalize(
+            root: root,
+            epoch: epoch,
+            shardID: shardID,
+            sender: "leader"
+        )
+
+        await transport.broadcast(msg)
+
+        return aggregator.aggregate(
+            epoch: epoch,
+            shardID: shardID,
+            signers: signers,
+            root: root
+        )
+    }
+
+    // -------------------------------------------------
+    // MARK: MESSAGE INTAKE (GOSSIP LOOP)
+    // -------------------------------------------------
+
+    public func receive() async -> DVSMProtocolMessage? {
+        await transport.receive()
+    }
+}
