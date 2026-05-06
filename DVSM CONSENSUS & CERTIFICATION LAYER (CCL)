@@ -1,0 +1,297 @@
+// =====================================================
+// DVSM CONSENSUS & CERTIFICATION LAYER (CCL)
+// HotStuff-Inspired • Quorum Certificates • Finality Engine
+// =====================================================
+//
+// ROLE:
+// This layer is responsible for:
+// - Achieving distributed agreement on state roots
+// - Producing quorum certificates (QC)
+// - Managing epoch-based leader agreement
+// - Coordinating commit / lock / prepare phases
+// - Producing finality guarantees for NRIL
+//
+// It does NOT:
+// - Execute transactions
+// - Perform networking
+// - Perform low-level cryptography operations
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - CONSENSUS STATES (HOTSTUFF-STYLE)
+// =====================================================
+
+public enum DVSMConsensusPhase: Sendable {
+    case prepare
+    case preCommit
+    case commit
+    case finalize
+}
+
+// =====================================================
+// MARK: - BLOCK / VIEW REPRESENTATION
+// =====================================================
+
+public struct DVSMConsensusBlock: Sendable {
+    public let blockID: String
+    public let parentID: String?
+    public let shardID: String
+    public let epoch: UInt64
+    public let stateRoot: String
+}
+
+// =====================================================
+// MARK: - VOTE MESSAGE
+// =====================================================
+
+public struct DVSMVote: Sendable {
+    public let voterID: String
+    public let blockID: String
+    public let phase: DVSMConsensusPhase
+    public let signature: Data
+}
+
+// =====================================================
+// MARK: - QUORUM CERTIFICATE (QC)
+// =====================================================
+
+public struct DVSMQuorumCertificate: Sendable {
+
+    public let blockID: String
+    public let epoch: UInt64
+    public let phase: DVSMConsensusPhase
+
+    // Threshold/BLS-ready aggregation field
+    public let aggregatedSignature: Data?
+
+    public let participatingNodes: [String]
+}
+
+// =====================================================
+// MARK: - CONSENSUS ERROR MODEL
+// =====================================================
+
+public enum DVSMConsensusError: Error, Sendable {
+    case insufficientVotes
+    case invalidPhaseTransition
+    case staleEpoch
+    case invalidBlock
+}
+
+// =====================================================
+// MARK: - LEADER SELECTION (EPOCH-BASED)
+// =====================================================
+
+public struct DVSMLeaderElection {
+
+    public init() {}
+
+    public func leader(for epoch: UInt64, nodes: [String]) -> String? {
+        guard !nodes.isEmpty else { return nil }
+        let index = Int(epoch % UInt64(nodes.count))
+        return nodes[index]
+    }
+}
+
+// =====================================================
+// MARK: - VOTE AGGREGATOR (QC BUILDER)
+// =====================================================
+
+public actor DVSMVoteAggregator {
+
+    private var votes: [String: [DVSMVote]] = [:]
+
+    public init() {}
+
+    public func submit(_ vote: DVSMVote) {
+        votes[vote.blockID, default: []].append(vote)
+    }
+
+    public func votes(for blockID: String) -> [DVSMVote] {
+        votes[blockID] ?? []
+    }
+
+    public func clear(blockID: String) {
+        votes.removeValue(forKey: blockID)
+    }
+}
+
+// =====================================================
+// MARK: - QUORUM RULE ENGINE
+// =====================================================
+
+public struct DVSMQuorumRuleEngine {
+
+    public init() {}
+
+    public func hasQuorum(votes: [DVSMVote], totalNodes: Int) -> Bool {
+        guard totalNodes > 0 else { return false }
+        return votes.count >= (2 * totalNodes / 3)
+    }
+}
+
+// =====================================================
+// MARK: - CONSENSUS CERTIFIER (CORE CCL ENGINE)
+// =====================================================
+
+public actor DVSMConsensusCertifier {
+
+    private let aggregator: DVSMVoteAggregator
+    private let quorum: DVSMQuorumRuleEngine
+
+    private var certifiedBlocks: [String: DVSMQuorumCertificate] = [:]
+
+    public init(
+        aggregator: DVSMVoteAggregator,
+        quorum: DVSMQuorumRuleEngine
+    ) {
+        self.aggregator = aggregator
+        self.quorum = quorum
+    }
+
+    // =====================================================
+    // MARK: - CERTIFICATION PIPELINE
+    // =====================================================
+
+    public func certify(
+        block: DVSMConsensusBlock,
+        totalNodes: Int,
+        phase: DVSMConsensusPhase
+    ) async throws -> DVSMQuorumCertificate {
+
+        let votes = await aggregator.votes(for: block.blockID)
+
+        guard quorum.hasQuorum(votes: votes, totalNodes: totalNodes) else {
+            throw DVSMConsensusError.insufficientVotes
+        }
+
+        let certificate = DVSMQuorumCertificate(
+            blockID: block.blockID,
+            epoch: block.epoch,
+            phase: phase,
+            aggregatedSignature: nil, // BLS hook point
+            participatingNodes: votes.map { $0.voterID }
+        )
+
+        certifiedBlocks[block.blockID] = certificate
+        await aggregator.clear(blockID: block.blockID)
+
+        return certificate
+    }
+
+    public func getCertificate(for blockID: String) -> DVSMQuorumCertificate? {
+        certifiedBlocks[blockID]
+    }
+}
+
+// =====================================================
+// MARK: - CONSENSUS STATE MACHINE (HOTSTUFF FLOW)
+// =====================================================
+
+public actor DVSMConsensusStateMachine {
+
+    private var phase: DVSMConsensusPhase = .prepare
+    private var lockedBlock: String?
+    private var committedBlock: String?
+
+    public init() {}
+
+    public func transition(
+        to newPhase: DVSMConsensusPhase,
+        blockID: String
+    ) throws {
+
+        switch (phase, newPhase) {
+
+        case (.prepare, .preCommit):
+            phase = .preCommit
+
+        case (.preCommit, .commit):
+            lockedBlock = blockID
+            phase = .commit
+
+        case (.commit, .finalize):
+            committedBlock = blockID
+            phase = .finalize
+
+        default:
+            throw DVSMConsensusError.invalidPhaseTransition
+        }
+    }
+
+    public func currentPhase() -> DVSMConsensusPhase {
+        phase
+    }
+
+    public func committed() -> String? {
+        committedBlock
+    }
+}
+
+// =====================================================
+// MARK: - FINALITY ENGINE (OUTPUT TO NRIL)
+// =====================================================
+
+public struct DVSMFinalityEngine {
+
+    public init() {}
+
+    public func finalize(certificate: DVSMQuorumCertificate) -> String {
+        return "FINALIZED:\(certificate.blockID):\(certificate.epoch)"
+    }
+}
+
+// =====================================================
+// MARK: - CCL ORCHESTRATOR
+// =====================================================
+
+public actor DVSMConsensusLayer {
+
+    private let certifier: DVSMConsensusCertifier
+    private let stateMachine: DVSMConsensusStateMachine
+    private let finality: DVSMFinalityEngine
+    private let leaderElection: DVSMLeaderElection
+
+    private var nodes: [String]
+
+    public init(
+        certifier: DVSMConsensusCertifier,
+        stateMachine: DVSMConsensusStateMachine,
+        finality: DVSMFinalityEngine,
+        leaderElection: DVSMLeaderElection,
+        nodes: [String]
+    ) {
+        self.certifier = certifier
+        self.stateMachine = stateMachine
+        self.finality = finality
+        self.leaderElection = leaderElection
+        self.nodes = nodes
+    }
+
+    // =====================================================
+    // MARK: - MAIN CONSENSUS FLOW
+    // =====================================================
+
+    public func process(
+        block: DVSMConsensusBlock,
+        phase: DVSMConsensusPhase
+    ) async throws -> String {
+
+        let qc = try await certifier.certify(
+            block: block,
+            totalNodes: nodes.count,
+            phase: phase
+        )
+
+        try stateMachine.transition(to: phase, blockID: block.blockID)
+
+        return finality.finalize(certificate: qc)
+    }
+
+    public func leader(for epoch: UInt64) -> String? {
+        leaderElection.leader(for: epoch, nodes: nodes)
+    }
+}
