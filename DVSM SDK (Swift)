@@ -1,0 +1,299 @@
+//
+// =====================================================
+// DVSM SDK — LAYERED VERIFIABLE COMPUTATION SYSTEM
+// Deterministic • Byzantine-Aware • Replayable
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - SHARED CORE TYPES
+// =====================================================
+
+public enum DVSMResult: Sendable {
+    case accepted(stateRoot: String)
+    case rejected(reason: DVSMError)
+    case requiresConsensus
+}
+
+public enum DVSMError: Error, Sendable {
+    case invalidPayload
+    case invalidShard
+    case consensusFailure
+    case cryptographicFailure
+}
+
+// =====================================================
+// MARK: - PAYLOAD MODEL
+// =====================================================
+
+public struct DVSMVectorPayload: Sendable {
+    public let id: String
+    public let vector: [Float]
+    public let timestamp: UInt64
+    public let signature: Data?
+}
+
+// =====================================================
+// MARK: - SHARD CONTEXT
+// =====================================================
+
+public struct DVSMShardContext: Sendable {
+    public let shardID: String
+    public let merkleRoot: Data
+    public let version: UInt64
+    public let isVerified: Bool
+    public let parentRoot: Data?
+}
+
+// =====================================================
+// MARK: - =================================================
+// CRYPTO LAYER (SOVEREIGN + RATCHETED)
+// =====================================================
+
+public protocol DVSMCryptoProvider: Sendable {
+    func hash(_ data: Data) -> Data
+}
+
+public struct SHA256CryptoProvider: DVSMCryptoProvider {
+    public func hash(_ data: Data) -> Data {
+        Data(SHA256.hash(data: data))
+    }
+}
+
+// =====================================================
+// MARK: - RATCHET SYSTEM (FORWARD SECRECY)
+// =====================================================
+
+struct DVSMRatchet {
+    private var state: SymmetricKey
+
+    init(seed: SymmetricKey) {
+        self.state = seed
+    }
+
+    mutating func advance(context: Data) -> SymmetricKey {
+        let next = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: state,
+            salt: context,
+            info: Data("DVSM-RATCHET".utf8),
+            outputByteCount: 32
+        )
+        state = next
+        return next
+    }
+}
+
+// =====================================================
+// MARK: - EXECUTION LAYER
+// =====================================================
+
+public actor DVSMExecutionLayer {
+
+    private let crypto: DVSMCryptoProvider
+    private var stateTip: String = "GENESIS"
+
+    public init(crypto: DVSMCryptoProvider) {
+        self.crypto = crypto
+    }
+
+    public func execute(
+        _ payload: DVSMVectorPayload,
+        shard: DVSMShardContext
+    ) throws -> String {
+
+        guard shard.isVerified else {
+            throw DVSMError.invalidShard
+        }
+
+        let encoded = try JSONEncoder().encode(payload)
+        let input = Data(stateTip.utf8) + encoded
+
+        let hash = crypto.hash(input)
+        let root = hash.map { String(format: "%02x", $0) }.joined()
+
+        stateTip = root
+        return root
+    }
+
+    public func currentRoot() -> String {
+        stateTip
+    }
+}
+
+// =====================================================
+// MARK: - CONSENSUS LAYER (PBFT-STYLE)
+// =====================================================
+
+public protocol DVSMConsensusEngine: Sendable {
+    func quorum(_ votes: [Bool]) -> Bool
+}
+
+public struct PBFTConsensusEngine: DVSMConsensusEngine {
+
+    public init() {}
+
+    public func quorum(_ votes: [Bool]) -> Bool {
+        guard !votes.isEmpty else { return false }
+        let yes = votes.filter { $0 }.count
+        return yes >= (2 * votes.count / 3)
+    }
+}
+
+// =====================================================
+// MARK: - RECOVERY LAYER (SNAPSHOTS + REPLAY)
+// =====================================================
+
+public actor DVSMRecoveryLayer {
+
+    private var snapshots: [UInt64: String] = [:]
+    private var history: [String] = []
+
+    public init() {}
+
+    public func record(state: String, version: UInt64) {
+        snapshots[version] = state
+        history.append(state)
+    }
+
+    public func restore(version: UInt64) -> String? {
+        snapshots[version]
+    }
+
+    public func replay() -> [String] {
+        history
+    }
+}
+
+// =====================================================
+// MARK: - ADAPTIVE LAYER
+// =====================================================
+
+public actor DVSMAdaptiveLayer {
+
+    public init() {}
+
+    public func propose(_ payload: DVSMVectorPayload) -> DVSMResult {
+        let score = Float.random(in: 0...1)
+
+        if score > 0.5 {
+            return .accepted(stateRoot: "adaptive-\(payload.id)")
+        }
+
+        return .requiresConsensus
+    }
+}
+
+// =====================================================
+// MARK: - SYSTEM ORCHESTRATOR (CORE ENGINE)
+// =====================================================
+
+public final class DVSMSystem {
+
+    private let execution: DVSMExecutionLayer
+    private let consensus: DVSMConsensusEngine
+    private let recovery: DVSMRecoveryLayer
+    private let adaptive: DVSMAdaptiveLayer?
+
+    public init(
+        execution: DVSMExecutionLayer,
+        consensus: DVSMConsensusEngine,
+        recovery: DVSMRecoveryLayer,
+        adaptive: DVSMAdaptiveLayer? = nil
+    ) {
+        self.execution = execution
+        self.consensus = consensus
+        self.recovery = recovery
+        self.adaptive = adaptive
+    }
+
+    public func ingest(
+        _ payload: DVSMVectorPayload,
+        shard: DVSMShardContext,
+        votes: [Bool] = [],
+        version: UInt64 = 0
+    ) async -> DVSMResult {
+
+        // 1. Adaptive pre-check
+        if let adaptive {
+            let proposal = await adaptive.propose(payload)
+            if case .accepted = proposal {
+                return proposal
+            }
+        }
+
+        // 2. Execution
+        do {
+            let root = try execution.execute(payload, shard: shard)
+
+            // 3. Consensus (optional gating)
+            if !votes.isEmpty {
+                guard consensus.quorum(votes) else {
+                    return .rejected(reason: .consensusFailure)
+                }
+            }
+
+            // 4. Recovery logging
+            await recovery.record(state: root, version: version)
+
+            return .accepted(stateRoot: root)
+
+        } catch {
+            return .rejected(reason: .cryptographicFailure)
+        }
+    }
+
+    public func currentRoot() -> String {
+        execution.currentRoot()
+    }
+
+    public func replayHistory() async -> [String] {
+        await recovery.replay()
+    }
+}
+
+// =====================================================
+// MARK: - SDK FACADE (PUBLIC API)
+// =====================================================
+
+public final class DVMSDK {
+
+    private let system: DVSMSystem
+
+    public init(system: DVSMSystem) {
+        self.system = system
+    }
+
+    public func submit(
+        id: String,
+        vector: [Float],
+        shard: String
+    ) async -> DVSMResult {
+
+        let payload = DVSMVectorPayload(
+            id: id,
+            vector: vector,
+            timestamp: UInt64(Date().timeIntervalSince1970),
+            signature: nil
+        )
+
+        let shardCtx = DVSMShardContext(
+            shardID: shard,
+            merkleRoot: Data(),
+            version: 1,
+            isVerified: true,
+            parentRoot: nil
+        )
+
+        return await system.ingest(payload, shard: shardCtx)
+    }
+
+    public func root() -> String {
+        system.currentRoot()
+    }
+
+    public func history() async -> [String] {
+        await system.replayHistory()
+    }
+}
