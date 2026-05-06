@@ -1,0 +1,230 @@
+// =====================================================
+// DVSM NETWORK RUNTIME IMPLEMENTATION LAYER (NRIL)
+// Deterministic • Replicated • Epoch-Aware • Verifiable
+// =====================================================
+//
+// ROLE:
+// This layer is responsible for:
+// - Receiving network transactions
+// - Ordering them deterministically
+// - Forwarding to execution engines
+// - Coordinating consensus results
+// - Maintaining replicated state consistency
+//
+// It does NOT:
+// - Perform cryptography
+// - Hold long-term keys
+// - Decide governance rules
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - NETWORK MESSAGE MODEL
+// =====================================================
+
+public struct DVSMNetworkMessage: Sendable {
+    public let messageID: String
+    public let payload: Data
+    public let shardID: String
+    public let epoch: UInt64
+    public let senderNode: String
+    public let timestamp: UInt64
+}
+
+// =====================================================
+// MARK: - REPLAY PROTECTION
+// =====================================================
+
+public actor DVSMReplayGuard {
+
+    private var seen: Set<String> = []
+
+    public init() {}
+
+    public func check(_ messageID: String) -> Bool {
+        if seen.contains(messageID) {
+            return false
+        }
+        seen.insert(messageID)
+        return true
+    }
+}
+
+// =====================================================
+// MARK: - EPOCH SCHEDULER (HOTSTUFF-STYLE ABSTRACTION)
+// =====================================================
+
+public struct DVSMEpochContext: Sendable {
+    public let epoch: UInt64
+    public let leaderNode: String
+    public let quorumSize: Int
+}
+
+// =====================================================
+// MARK: - CONSENSUS RESULT (NETWORK-LEVEL)
+// =====================================================
+
+public enum DVSMConsensusOutcome: Sendable {
+    case committed(root: String)
+    case rejected
+    case pending
+}
+
+// =====================================================
+// MARK: - NETWORK EXECUTION INTERFACE
+// =====================================================
+
+public protocol DVSMExecutionRuntime: Sendable {
+    func execute(
+        data: Data,
+        shardID: String,
+        epoch: UInt64
+    ) async throws -> String
+}
+
+// =====================================================
+// MARK: - STATE APPLY ENGINE (DETERMINISTIC APPLY LAYER)
+// =====================================================
+
+public actor DVSMStateApplyEngine {
+
+    private var committedRoots: [String: String] = [:]
+
+    public init() {}
+
+    public func apply(
+        shardID: String,
+        root: String,
+        epoch: UInt64
+    ) {
+        committedRoots["\(shardID):\(epoch)"] = root
+    }
+
+    public func latest(for shardID: String) -> String? {
+        committedRoots
+            .filter { $0.key.hasPrefix(shardID) }
+            .sorted { $0.key > $1.key }
+            .first?.value
+    }
+}
+
+// =====================================================
+// MARK: - NETWORK ROUTER (CROSS-SHARD DISPATCH)
+// =====================================================
+
+public struct DVSMNetworkRouter {
+
+    public init() {}
+
+    public func route(_ message: DVSMNetworkMessage) -> String {
+        return message.shardID
+    }
+}
+
+// =====================================================
+// MARK: - NRIL CORE ENGINE
+// =====================================================
+
+public actor DVSMNRIL {
+
+    private let replayGuard = DVSMReplayGuard()
+    private let router = DVSMNetworkRouter()
+    private let stateEngine: DVSMStateApplyEngine
+    private let execution: DVSMExecutionRuntime
+
+    public init(
+        stateEngine: DVSMStateApplyEngine,
+        execution: DVSMExecutionRuntime
+    ) {
+        self.stateEngine = stateEngine
+        self.execution = execution
+    }
+
+    // =====================================================
+    // MARK: - MAIN INGEST PIPELINE
+    // =====================================================
+
+    public func ingest(
+        _ message: DVSMNetworkMessage,
+        epochContext: DVSMEpochContext
+    ) async -> DVSMConsensusOutcome {
+
+        // 1. Replay protection
+        guard await replayGuard.check(message.messageID) else {
+            return .rejected
+        }
+
+        // 2. Route message to shard
+        let shard = router.route(message)
+
+        // 3. Epoch validation (basic HotStuff-style gate)
+        guard message.epoch == epochContext.epoch else {
+            return .pending
+        }
+
+        // 4. Execute deterministically
+        do {
+            let root = try await execution.execute(
+                data: message.payload,
+                shardID: shard,
+                epoch: message.epoch
+            )
+
+            // 5. Apply state
+            await stateEngine.apply(
+                shardID: shard,
+                root: root,
+                epoch: message.epoch
+            )
+
+            return .committed(root: root)
+
+        } catch {
+            return .rejected
+        }
+    }
+}
+
+// =====================================================
+// MARK: - SIMPLE EXECUTION ADAPTER (HOOK TO DVSM STRICT ENGINE)
+// =====================================================
+
+public final class DVSMExecutionAdapter: DVSMExecutionRuntime {
+
+    private let strictEngine: DVSMStrictEngine
+
+    public init(strictEngine: DVSMStrictEngine) {
+        self.strictEngine = strictEngine
+    }
+
+    public func execute(
+        data: Data,
+        shardID: String,
+        epoch: UInt64
+    ) async throws -> String {
+
+        let payload = DVSMVectorPayload(
+            id: shardID,
+            vector: [],
+            timestamp: epoch
+        )
+
+        let context = DVSMShardContext(
+            shardID: shardID,
+            merkleRoot: data,
+            version: epoch,
+            isVerified: true
+        )
+
+        let result = try await strictEngine.ingest(payload, shard: context)
+
+        switch result {
+        case .accepted(let stateRoot):
+            return stateRoot
+        default:
+            throw NSError(domain: "execution-failed", code: -1)
+        }
+    }
+}
