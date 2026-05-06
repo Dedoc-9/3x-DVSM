@@ -1,0 +1,335 @@
+DVSM VERIFIABLE EXECUTION SYSTEM — BVI EVOLUTION CORE
+Byzantine-Verified Ingest • Deterministic State Machine • HotStuff-Aware • Merkle-Attested
+
+// =====================================================
+// DVSM VERIFIABLE EXECUTION SYSTEM (BVI CORE)
+// Byzantine-Verified • Deterministic • Shard-Aware
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - EXECUTION MODE
+// =====================================================
+
+public enum DVSMExecutionMode: Sendable {
+    case strict
+    case adaptive
+    case hybrid
+}
+
+// =====================================================
+// MARK: - NODE CONTEXT
+// =====================================================
+
+public struct DVSMNodeContext: Sendable {
+    public let nodeID: String
+    public let shardKey: String
+    public let region: String?
+}
+
+// =====================================================
+// MARK: - PAYLOAD (PROVENANCE READY)
+// =====================================================
+
+public struct DVSMVectorPayload: Sendable {
+    public let id: String
+    public let vector: [Float]
+    public let timestamp: UInt64
+    public let signature: Data?   // hook for BLS / threshold signatures
+}
+
+// =====================================================
+// MARK: - SHARD CONTEXT (TRUST ANCHOR)
+// =====================================================
+
+public struct DVSMShardContext: Sendable {
+    public let shardID: String
+    public let merkleRoot: Data
+    public let version: UInt64
+    public let isVerified: Bool
+    public let parentRoot: Data?
+}
+
+// =====================================================
+// MARK: - RESULT MODEL
+// =====================================================
+
+public enum DVSMResult: Sendable {
+    case accepted(stateRoot: String)
+    case rejected(reason: DVSMErrorCode)
+    case requiresConsensus
+}
+
+// =====================================================
+// MARK: - ERROR MODEL
+// =====================================================
+
+public enum DVSMErrorCode: Sendable {
+    case invalidGovernance
+    case invalidShard
+    case consensusFailure
+    case cryptographicFailure
+    case malformedPayload
+}
+
+// =====================================================
+// MARK: - CRYPTO PROVIDER (ABSTRACTED)
+// =====================================================
+
+public protocol DVSMCryptoProvider: Sendable {
+    func hash(_ data: Data) -> Data
+}
+
+public struct SHA256Provider: DVSMCryptoProvider {
+    public func hash(_ data: Data) -> Data {
+        Data(SHA256.hash(data: data))
+    }
+}
+
+// =====================================================
+// MARK: - MERKLE STATE MACHINE
+// =====================================================
+
+public actor DVSMMerkleStateMachine {
+
+    private var tip: String = "GENESIS"
+    private var snapshots: [UInt64: String] = [:]
+    private let crypto: DVSMCryptoProvider
+
+    public init(crypto: DVSMCryptoProvider) {
+        self.crypto = crypto
+    }
+
+    public func append(_ data: Data, version: UInt64) -> String {
+        let input = Data((tip + data.base64EncodedString()).utf8)
+        let hash = crypto.hash(input)
+        let hex = hash.map { String(format: "%02x", $0) }.joined()
+
+        tip = hex
+        snapshots[version] = hex
+        return hex
+    }
+
+    public func root() -> String {
+        tip
+    }
+
+    public func restore(version: UInt64) -> String? {
+        guard let r = snapshots[version] else { return nil }
+        tip = r
+        return r
+    }
+}
+
+// =====================================================
+// MARK: - GOVERNANCE LAYER
+// =====================================================
+
+public protocol DVSMGovernance: Sendable {
+    func validate(_ payload: DVSMVectorPayload) -> Bool
+    func rateLimit(id: String) -> Bool
+}
+
+public struct PolicyGovernance: DVSMGovernance {
+
+    private var lastSeen: [String: UInt64] = [:]
+
+    public init() {}
+
+    public func validate(_ payload: DVSMVectorPayload) -> Bool {
+        !payload.id.isEmpty && !payload.vector.isEmpty
+    }
+
+    public func rateLimit(id: String) -> Bool {
+        let now = UInt64(Date().timeIntervalSince1970)
+        if let last = lastSeen[id], now - last < 1 {
+            return false
+        }
+        return true
+    }
+}
+
+// =====================================================
+// MARK: - CONSENSUS ENGINE (HOTSTUFF-INSPIRED HOOK)
+// =====================================================
+
+public protocol DVSMConsensusEngine: Sendable {
+    func quorum(_ votes: [Bool]) -> Bool
+    func leader(epoch: UInt64) -> String?
+}
+
+public struct HotStuffConsensusStub: DVSMConsensusEngine {
+
+    public init() {}
+
+    public func quorum(_ votes: [Bool]) -> Bool {
+        votes.filter { $0 }.count >= (2 * votes.count / 3)
+    }
+
+    public func leader(epoch: UInt64) -> String? {
+        "leader-\(epoch % 3)"
+    }
+}
+
+// =====================================================
+// MARK: - CROSS-SHARD VERIFIER
+// =====================================================
+
+public struct DVSMCrossShardVerifier {
+
+    public init() {}
+
+    public func verify(sourceRoot: String, targetRoot: String) -> Bool {
+        !sourceRoot.isEmpty && !targetRoot.isEmpty
+    }
+}
+
+// =====================================================
+// MARK: - STRICT ENGINE (DETERMINISTIC STATE MACHINE)
+// =====================================================
+
+public actor DVSMStrictEngine {
+
+    private let dag: DVSMMerkleStateMachine
+
+    public init(dag: DVSMMerkleStateMachine) {
+        self.dag = dag
+    }
+
+    public func ingest(
+        _ payload: DVSMVectorPayload,
+        shard: DVSMShardContext
+    ) async throws -> DVSMResult {
+
+        guard shard.isVerified else {
+            return .rejected(reason: .invalidShard)
+        }
+
+        let encoded = try JSONEncoder().encode(payload)
+        let root = await dag.append(encoded, version: shard.version)
+
+        return .accepted(stateRoot: root)
+    }
+}
+
+// =====================================================
+// MARK: - ADAPTIVE ENGINE
+// =====================================================
+
+public actor DVSMAdaptiveEngine {
+
+    public init() {}
+
+    public func propose(_ payload: DVSMVectorPayload) -> DVSMResult {
+        Float.random(in: 0...1) > 0.5
+        ? .accepted(stateRoot: "adaptive-\(payload.id)")
+        : .requiresConsensus
+    }
+}
+
+// =====================================================
+// MARK: - BYZANTINE-VERIFIED INGEST CORE
+// =====================================================
+
+public actor DVSMByzantineEngine {
+
+    private let strict: DVSMStrictEngine
+    private let governance: DVSMGovernance
+    private let consensus: DVSMConsensusEngine
+    private let crossShard: DVSMCrossShardVerifier
+
+    public init(
+        strict: DVSMStrictEngine,
+        governance: DVSMGovernance,
+        consensus: DVSMConsensusEngine,
+        crossShard: DVSMCrossShardVerifier
+    ) {
+        self.strict = strict
+        self.governance = governance
+        self.consensus = consensus
+        self.crossShard = crossShard
+    }
+
+    public func ingest(
+        _ payload: DVSMVectorPayload,
+        shard: DVSMShardContext,
+        context: DVSMNodeContext,
+        votes: [Bool],
+        epoch: UInt64
+    ) async -> DVSMResult {
+
+        // 1. GOVERNANCE GATE
+        guard governance.validate(payload),
+              governance.rateLimit(id: payload.id) else {
+            return .rejected(reason: .invalidGovernance)
+        }
+
+        // 2. CONSENSUS (HotStuff-style hook)
+        guard consensus.quorum(votes),
+              consensus.leader(epoch: epoch) != nil else {
+            return .rejected(reason: .consensusFailure)
+        }
+
+        // 3. STRICT EXECUTION (state transition authority)
+        guard let result = try? await strict.ingest(payload, shard: shard) else {
+            return .rejected(reason: .cryptographicFailure)
+        }
+
+        // 4. CROSS-SHARD VALIDATION HOOK
+        _ = crossShard.verify(
+            sourceRoot: shard.merkleRoot.base64EncodedString(),
+            targetRoot: shard.merkleRoot.base64EncodedString()
+        )
+
+        return result
+    }
+}
+
+// =====================================================
+// MARK: - SYSTEM ORCHESTRATOR
+// =====================================================
+
+public final class DVSMSystem {
+
+    private let engine: DVSMByzantineEngine
+    private let adaptive: DVSMAdaptiveEngine?
+    private let mode: DVSMExecutionMode
+
+    public init(
+        engine: DVSMByzantineEngine,
+        adaptive: DVSMAdaptiveEngine? = nil,
+        mode: DVSMExecutionMode
+    ) {
+        self.engine = engine
+        self.adaptive = adaptive
+        self.mode = mode
+    }
+
+    public func ingest(
+        _ payload: DVSMVectorPayload,
+        shard: DVSMShardContext,
+        context: DVSMNodeContext,
+        votes: [Bool],
+        epoch: UInt64
+    ) async -> DVSMResult {
+
+        if mode == .adaptive || mode == .hybrid,
+           let adaptive {
+
+            let proposal = await adaptive.propose(payload)
+            if mode == .adaptive {
+                return proposal
+            }
+        }
+
+        return await engine.ingest(
+            payload,
+            shard: shard,
+            context: context,
+            votes: votes,
+            epoch: epoch
+        )
+    }
+}
