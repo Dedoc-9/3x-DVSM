@@ -1,0 +1,230 @@
+// =====================================================
+// DVSM DISTRIBUTED VERIFICATION LAYER (DVL)
+// Networked Replication • Proof Transport • Epoch Coordination
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - NODE IDENTITY (NETWORK TRUST ANCHOR)
+// =====================================================
+
+public struct DVSMNodeIdentity: Sendable {
+    public let nodeID: String
+    public let publicKey: Data
+    public let region: String?
+}
+
+// =====================================================
+// MARK: - NETWORK MESSAGE (ATOMIC TRANSPORT UNIT)
+// =====================================================
+
+public struct DVSMNetworkMessage: Sendable {
+    public let payload: Data
+    public let signature: Data?
+    public let epoch: UInt64
+    public let shardID: String
+}
+
+// =====================================================
+// MARK: - QUORUM CERTIFICATE (BLS HOOK PLACEHOLDER)
+// =====================================================
+
+public struct DVSMQuorumCertificate: Sendable {
+    public let epoch: UInt64
+    public let rootHash: String
+    public let aggregatedSignature: Data?   // BLS future hook
+    public let signers: [String]
+}
+
+// =====================================================
+// MARK: - MERKLE PROOF PATH (STRUCTURAL → VERIFIABLE UPGRADE POINT)
+// =====================================================
+
+public struct DVSMMerkleProof: Sendable {
+    public let leafHash: String
+    public let siblingPath: [String]
+    public let rootHash: String
+}
+
+// =====================================================
+// MARK: - NETWORK TRANSPORT LAYER (ABSTRACTED)
+// =====================================================
+
+public protocol DVSMTransportLayer: Sendable {
+    func broadcast(_ message: DVSMNetworkMessage) async
+    func receive() async -> DVSMNetworkMessage?
+}
+
+// =====================================================
+// MARK: - IN-MEMORY TRANSPORT (DEV ONLY)
+// =====================================================
+
+public actor DVSMInMemoryTransport: DVSMTransportLayer {
+
+    private var queue: [DVSMNetworkMessage] = []
+
+    public init() {}
+
+    public func broadcast(_ message: DVSMNetworkMessage) async {
+        queue.append(message)
+    }
+
+    public func receive() async -> DVSMNetworkMessage? {
+        queue.isEmpty ? nil : queue.removeFirst()
+    }
+}
+
+// =====================================================
+// MARK: - REPLICATION ENGINE (STATE PROPAGATION)
+// =====================================================
+
+public actor DVSMReplicationEngine {
+
+    private let transport: DVSMTransportLayer
+
+    public init(transport: DVSMTransportLayer) {
+        self.transport = transport
+    }
+
+    public func replicate(
+        root: String,
+        shardID: String,
+        epoch: UInt64
+    ) async {
+
+        let message = DVSMNetworkMessage(
+            payload: Data(root.utf8),
+            signature: nil,
+            epoch: epoch,
+            shardID: shardID
+        )
+
+        await transport.broadcast(message)
+    }
+
+    public func receive() async -> DVSMNetworkMessage? {
+        await transport.receive()
+    }
+}
+
+// =====================================================
+// MARK: - CONSENSUS CERTIFICATION LAYER (HOTSTUFF HOOK)
+// =====================================================
+
+public actor DVSMConsensusCertificateEngine {
+
+    public init() {}
+
+    public func buildCertificate(
+        epoch: UInt64,
+        rootHash: String,
+        signers: [String]
+    ) -> DVSMQuorumCertificate {
+
+        DVSMQuorumCertificate(
+            epoch: epoch,
+            rootHash: rootHash,
+            aggregatedSignature: nil, // BLS aggregation hook (future)
+            signers: signers
+        )
+    }
+
+    public func validate(_ qc: DVSMQuorumCertificate) -> Bool {
+        !qc.rootHash.isEmpty && qc.signers.count > 0
+    }
+}
+
+// =====================================================
+// MARK: - MERKLE PROOF VERIFIER (LOCAL VALIDATION LAYER)
+// =====================================================
+
+public struct DVSMMerkleProofVerifier {
+
+    public init() {}
+
+    public func verify(_ proof: DVSMMerkleProof) -> Bool {
+        // Placeholder structural validation
+        !proof.leafHash.isEmpty &&
+        !proof.rootHash.isEmpty &&
+        !proof.siblingPath.isEmpty
+    }
+}
+
+// =====================================================
+// MARK: - CROSS-NODE STATE SYNCHRONIZER
+// =====================================================
+
+public actor DVSMStateSynchronizer {
+
+    private let replication: DVSMReplicationEngine
+    private let consensus: DVSMConsensusCertificateEngine
+
+    public init(
+        replication: DVSMReplicationEngine,
+        consensus: DVSMConsensusCertificateEngine
+    ) {
+        self.replication = replication
+        self.consensus = consensus
+    }
+
+    public func sync(
+        root: String,
+        shardID: String,
+        epoch: UInt64,
+        signers: [String]
+    ) async -> DVSMQuorumCertificate {
+
+        await replication.replicate(
+            root: root,
+            shardID: shardID,
+            epoch: epoch
+        )
+
+        return consensus.buildCertificate(
+            epoch: epoch,
+            rootHash: root,
+            signers: signers
+        )
+    }
+}
+
+// =====================================================
+// MARK: - DISTRIBUTED VERIFICATION NODE (ABSTRACTION LAYER)
+// =====================================================
+
+public actor DVSMVerificationNode {
+
+    private let sync: DVSMStateSynchronizer
+    private let verifier: DVSMMerkleProofVerifier
+
+    public init(
+        sync: DVSMStateSynchronizer,
+        verifier: DVSMMerkleProofVerifier
+    ) {
+        self.sync = sync
+        self.verifier = verifier
+    }
+
+    // Core distributed verification step
+    public func submitState(
+        root: String,
+        shardID: String,
+        epoch: UInt64,
+        signers: [String]
+    ) async -> DVSMQuorumCertificate {
+
+        await sync.sync(
+            root: root,
+            shardID: shardID,
+            epoch: epoch,
+            signers: signers
+        )
+    }
+
+    // Proof validation path
+    public func verifyProof(_ proof: DVSMMerkleProof) -> Bool {
+        verifier.verify(proof)
+    }
+}
