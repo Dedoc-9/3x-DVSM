@@ -1,0 +1,247 @@
+// =====================================================
+// DVSM NETWORK PROTOCOL LAYER (NPL)
+// Canonical Messaging • Gossip Semantics • Verifiable Transport
+// =====================================================
+//
+// ROLE:
+// This layer defines:
+// - Network message formats
+// - Shard routing envelopes
+// - Epoch + consensus metadata
+// - Proof + signature containers
+// - Transport-agnostic protocol rules
+//
+// It does NOT:
+// - Execute state
+// - Perform consensus decisions
+// - Perform cryptographic operations (only carries proofs)
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - PROTOCOL VERSIONING
+// =====================================================
+
+public enum DVSMProtocolVersion: String, Sendable {
+    case v1 = "dvsm-protocol-v1"
+}
+
+// =====================================================
+// MARK: - SHARD ADDRESSING
+// =====================================================
+
+public struct DVSMShardAddress: Sendable {
+    public let shardID: String
+    public let region: String?
+}
+
+// =====================================================
+// MARK: - NETWORK ENVELOPE (CANONICAL MESSAGE WRAPPER)
+// =====================================================
+
+public struct DVSMNetworkEnvelope: Sendable {
+
+    public let version: DVSMProtocolVersion
+    public let messageID: String
+
+    public let shard: DVSMShardAddress
+    public let epoch: UInt64
+
+    public let senderNodeID: String
+    public let timestamp: UInt64
+
+    public let payload: Data
+
+    // =================================================
+    // VERIFIABILITY EXTENSIONS
+    // =================================================
+
+    public let payloadHash: Data
+    public let parentMessageHash: Data?
+
+    // Signature / proof container (BLS / zk ready)
+    public let signatureBundle: DVSMSignatureBundle?
+}
+
+// =====================================================
+// MARK: - SIGNATURE BUNDLE (MULTI-SCHEME READY)
+// =====================================================
+
+public struct DVSMSignatureBundle: Sendable {
+
+    // Placeholder for future BLS aggregation
+    public let aggregatedSignature: Data?
+
+    // Individual node signatures (fallback / audit mode)
+    public let signatures: [DVSMNodeSignature]
+
+    public let threshold: UInt16
+}
+
+// =====================================================
+// MARK: - NODE SIGNATURE
+// =====================================================
+
+public struct DVSMNodeSignature: Sendable {
+    public let nodeID: String
+    public let signature: Data
+}
+
+// =====================================================
+// MARK: - ZK PROOF CONTAINER (HOOK ONLY)
+// =====================================================
+
+public struct DVSMZKProof: Sendable {
+    public let proofBytes: Data
+    public let publicInputs: Data
+}
+
+// =====================================================
+// MARK: - NETWORK MESSAGE TYPES
+// =====================================================
+
+public enum DVSMNetworkMessageType: Sendable {
+    case transaction
+    case consensusVote
+    case stateCommit
+    case shardSync
+    case epochChange
+}
+
+// =====================================================
+// MARK: - PROTOCOL MESSAGE
+// =====================================================
+
+public struct DVSMProtocolMessage: Sendable {
+
+    public let type: DVSMNetworkMessageType
+    public let envelope: DVSMNetworkEnvelope
+
+    // Optional extensions
+    public let zkProof: DVSMZKProof?
+}
+
+// =====================================================
+// MARK: - GOSSIP POLICY (TRANSPORT ABSTRACTION)
+// =====================================================
+
+public enum DVSMGossipPolicy: Sendable {
+    case broadcast
+    case shardLocal
+    case epochScoped
+    case quorumOnly
+}
+
+// =====================================================
+// MARK: - ROUTING RULES
+// =====================================================
+
+public struct DVSMRoutingRules: Sendable {
+
+    public let policy: DVSMGossipPolicy
+    public let maxFanout: Int
+    public let retryLimit: Int
+}
+
+// =====================================================
+// MARK: - MESSAGE VALIDATION CONTRACT
+// =====================================================
+
+public protocol DVSMProtocolValidator: Sendable {
+    func validate(_ message: DVSMProtocolMessage) -> Bool
+}
+
+// =====================================================
+// MARK: - DEFAULT VALIDATOR (STRUCTURAL ONLY)
+// =====================================================
+
+public struct DVSMDefaultProtocolValidator: DVSMProtocolValidator {
+
+    public init() {}
+
+    public func validate(_ message: DVSMProtocolMessage) -> Bool {
+
+        // Structural validation only (NO crypto verification here)
+        guard !message.envelope.messageID.isEmpty else { return false }
+        guard message.envelope.epoch > 0 else { return false }
+        guard !message.envelope.payload.isEmpty else { return false }
+
+        return true
+    }
+}
+
+// =====================================================
+// MARK: - SHARD ROUTING ENGINE (PROTOCOL LEVEL)
+// =====================================================
+
+public struct DVSMShardRouter {
+
+    public init() {}
+
+    public func route(_ shard: DVSMShardAddress) -> String {
+
+        // Deterministic routing key (no execution logic)
+        return "\(shard.shardID):\(shard.region ?? "global")"
+    }
+}
+
+// =====================================================
+// MARK: - EPOCH CONTROL PLANE
+// =====================================================
+
+public struct DVSMEpochDescriptor: Sendable {
+
+    public let epoch: UInt64
+    public let leaderNodeID: String
+    public let quorumSize: Int
+    public let viewChangeRound: UInt64
+}
+
+// =====================================================
+// MARK: - CONSENSUS TRANSPORT CONTRACT
+// =====================================================
+
+public enum DVSMConsensusMessage: Sendable {
+
+    case vote(nodeID: String, messageHash: Data)
+    case proposal(nodeID: String, envelope: DVSMNetworkEnvelope)
+    case commit(root: Data, epoch: UInt64)
+}
+
+// =====================================================
+// MARK: - CROSS-SHARD PROOF TRANSPORT
+// =====================================================
+
+public struct DVSMCrossShardProofEnvelope: Sendable {
+
+    public let sourceShard: DVSMShardAddress
+    public let targetShard: DVSMShardAddress
+
+    public let merkleProofPath: [Data]
+    public let rootHash: Data
+}
+
+// =====================================================
+// MARK: - NETWORK OBSERVABILITY HOOKS
+// =====================================================
+
+public struct DVSMNetworkTelemetry: Sendable {
+
+    public let messageLatencyMs: Double
+    public let propagationHops: Int
+    public let dropRate: Double
+}
+
+// =====================================================
+// MARK: - PROTOCOL ENTRY SPEC (INGRESS CONTRACT)
+// =====================================================
+
+public protocol DVSMNetworkIngress: Sendable {
+
+    func receive(
+        _ message: DVSMProtocolMessage,
+        epoch: DVSMEpochDescriptor
+    ) async -> Bool
+}
