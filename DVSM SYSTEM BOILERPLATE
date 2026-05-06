@@ -1,0 +1,173 @@
+// =====================================================
+// DVSM SYSTEM BOILERPLATE (3-SYSTEM ARCHITECTURE)
+// =====================================================
+//
+// CORE IDEA:
+// DVSM is not one system — it is three coupled systems:
+//
+// 1. EXECUTION SYSTEM (what should happen)
+// 2. CONSENSUS SYSTEM (what is agreed happened)
+// 3. RECOVERY SYSTEM (what actually happened over time)
+//
+// These systems are intentionally separated to prevent
+// coupling of truth, execution, and reconstruction.
+// =====================================================
+
+import Foundation
+
+// =====================================================
+// MARK: - SYSTEM I: EXECUTION DOMAIN (NRIL + STRICT ENGINE)
+// =====================================================
+//
+// RESPONSIBILITY:
+// - Deterministic computation
+// - Adaptive execution fallback
+// - Payload ingestion
+// - Governance enforcement (pre-consensus)
+//
+// DOES NOT:
+// - Finalize state
+// - Persist history
+// - Coordinate nodes
+// =====================================================
+
+public enum DVSMExecutionSystem {
+
+    case strictDeterministicExecution
+    case adaptiveProbabilisticExecution
+    case hybridExecutionMode
+}
+
+// Execution guarantees (logical contract only)
+public struct DVSMExecutionGuarantees {
+
+    public static let deterministicWhereEnabled = true
+    public static let governancePrecheckRequired = true
+    public static let noConsensusAuthority = true
+}
+
+// =====================================================
+// MARK: - SYSTEM II: CONSENSUS DOMAIN (CCL)
+// =====================================================
+//
+// RESPONSIBILITY:
+// - Quorum agreement
+// - Leader rotation
+// - Epoch finality
+// - State root certification
+//
+// DOES NOT:
+// - Execute payloads
+// - Store long-term history
+// - Perform transport routing
+// =====================================================
+
+public enum DVSMConsensusSystem {
+
+    case hotstuffInspiredFinality
+    case pbftStyleQuorum
+    case hybridEpochConsensus
+}
+
+public struct DVSMConsensusGuarantees {
+
+    public static let byzantineToleranceAssumed = true
+    public static let quorumRequiredForFinality = true
+    public static let linearizableFinalityTarget = true
+}
+
+// =====================================================
+// MARK: - SYSTEM III: RECOVERY DOMAIN (PSRL + GSRL)
+// =====================================================
+//
+// RESPONSIBILITY:
+// - Snapshot creation
+// - Replay execution logs
+// - Fork detection
+// - Cross-node reconciliation
+// - Global state alignment
+//
+// DOES NOT:
+// - Decide validity of transactions
+// - Modify consensus rules
+// - Execute computation
+// =====================================================
+
+public enum DVSMRecoverySystem {
+
+    case snapshotBasedPersistence
+    case deterministicReplayEngine
+    case globalSyncReconciliation
+}
+
+public struct DVSMRecoveryGuarantees {
+
+    public static let fullReplayability = true
+    public static let rollbackSupported = true
+    public static let forkDetectionEnabled = true
+    public static let crossNodeAlignmentRequired = true
+}
+
+// =====================================================
+// MARK: - CROSS-SYSTEM INTERACTION MODEL
+// =====================================================
+//
+// EXECUTION → produces candidate state transitions
+// CONSENSUS → certifies accepted transitions
+// RECOVERY → reconstructs system truth over time
+//
+// IMPORTANT:
+// Each system is independent and non-authoritative
+// outside its domain of responsibility.
+// =====================================================
+
+public enum DVSMSystemFlow {
+
+    case executionProducesCandidateState
+    case consensusCertifiesFinalState
+    case recoveryRebuildsHistoricalState
+}
+
+// =====================================================
+// MARK: - SYSTEM ISOLATION RULES
+// =====================================================
+//
+// HARD CONSTRAINTS:
+//
+// Execution cannot finalize state
+// Consensus cannot execute logic
+// Recovery cannot alter history
+//
+// This prevents:
+// - Hidden side effects
+// - Silent state corruption
+// - Cross-layer authority leakage
+// =====================================================
+
+public struct DVSMIsolationRules {
+
+    public static let executionIsNonFinalAuthority = true
+    public static let consensusIsNonStorageLayer = true
+    public static let recoveryIsNonMutating = true
+}
+
+// =====================================================
+// MARK: - EXTENSION SURFACE (FUTURE INTEGRATION POINTS)
+// =====================================================
+//
+// Execution System:
+// - zk-proofs for computation validation
+// - secure enclave execution attestation
+//
+// Consensus System:
+// - BLS threshold signatures
+// - HotStuff full implementation
+//
+// Recovery System:
+// - distributed log replication
+// - Merkle inclusion proof chains
+// =====================================================
+
+// =====================================================
+// END OF DVSM 3-SYSTEM BOILERPLATE
+// =====================================================
