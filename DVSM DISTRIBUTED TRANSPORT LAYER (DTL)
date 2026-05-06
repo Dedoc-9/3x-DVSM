@@ -1,0 +1,317 @@
+// =====================================================
+// DVSM DISTRIBUTED TRANSPORT LAYER (DTL)
+// Peer-to-Peer Fabric • Gossip Routing • Epoch Sync
+// =====================================================
+//
+// ROLE:
+// This layer provides:
+// - Node-to-node communication primitives
+// - Gossip propagation mechanics
+// - Shard-aware routing transport
+// - Epoch synchronization channels
+// - Reliable message delivery abstraction
+//
+// It does NOT:
+// - Interpret payload semantics
+// - Perform consensus decisions
+// - Perform cryptography verification
+// =====================================================
+
+import Foundation
+
+// =====================================================
+// MARK: - NODE IDENTITY (TRANSPORT LEVEL ONLY)
+// =====================================================
+
+public struct DVSMNodeIdentity: Sendable {
+    public let nodeID: String
+    public let region: String?
+    public let capabilities: [String]
+}
+
+// =====================================================
+// MARK: - TRANSPORT MESSAGE FRAME
+// =====================================================
+
+public struct DVSMTransportFrame: Sendable {
+
+    public let frameID: String
+    public let sourceNode: String
+    public let destinationNode: String?
+
+    public let shardID: String
+    public let epoch: UInt64
+
+    public let payload: Data
+
+    public let timestamp: UInt64
+}
+
+// =====================================================
+// MARK: - TRANSPORT ERROR MODEL
+// =====================================================
+
+public enum DVSMTransportError: Error, Sendable {
+    case deliveryFailure
+    case nodeUnreachable
+    case invalidFrame
+    case timeout
+}
+
+// =====================================================
+// MARK: - PEER DISCOVERY TABLE
+// =====================================================
+
+public actor DVSMPeerDirectory {
+
+    private var peers: [String: DVSMNodeIdentity] = [:]
+
+    public init() {}
+
+    public func register(_ node: DVSMNodeIdentity) {
+        peers[node.nodeID] = node
+    }
+
+    public func resolve(_ nodeID: String) -> DVSMNodeIdentity? {
+        peers[nodeID]
+    }
+
+    public func allPeers() -> [DVSMNodeIdentity] {
+        Array(peers.values)
+    }
+}
+
+// =====================================================
+// MARK: - TRANSPORT BACKEND CONTRACT
+// =====================================================
+
+public protocol DVSMTransportBackend: Sendable {
+
+    func send(_ frame: DVSMTransportFrame) async throws
+
+    func broadcast(
+        _ frame: DVSMTransportFrame,
+        to nodes: [String]
+    ) async throws
+
+    func receive() async throws -> DVSMTransportFrame
+}
+
+// =====================================================
+// MARK: - GOSSIP STRATEGY (SHARD-AWARE)
+// =====================================================
+
+public enum DVSMGossipStrategy: Sendable {
+    case flood
+    case shardLocal
+    case epochScoped
+    case quorumBound
+}
+
+// =====================================================
+// MARK: - TRANSPORT ROUTER
+// =====================================================
+
+public struct DVSMTransportRouter {
+
+    public init() {}
+
+    public func route(
+        frame: DVSMTransportFrame,
+        strategy: DVSMGossipStrategy
+    ) -> String {
+
+        switch strategy {
+
+        case .flood:
+            return "broadcast"
+
+        case .shardLocal:
+            return "shard:\(frame.shardID)"
+
+        case .epochScoped:
+            return "epoch:\(frame.epoch)"
+
+        case .quorumBound:
+            return "quorum:\(frame.shardID):\(frame.epoch)"
+        }
+    }
+}
+
+// =====================================================
+// MARK: - RELIABLE DELIVERY LAYER (BEST-EFFORT ACK)
+// =====================================================
+
+public actor DVSMReliableDelivery {
+
+    private var pendingAcks: Set<String> = []
+
+    public init() {}
+
+    public func track(_ frameID: String) {
+        pendingAcks.insert(frameID)
+    }
+
+    public func acknowledge(_ frameID: String) {
+        pendingAcks.remove(frameID)
+    }
+
+    public func pending() -> [String] {
+        Array(pendingAcks)
+    }
+}
+
+// =====================================================
+// MARK: - GOSSIP ENGINE (CORE DISTRIBUTION MECHANISM)
+// =====================================================
+
+public actor DVSMGossipEngine {
+
+    private let backend: DVSMTransportBackend
+    private let peers: DVSMPeerDirectory
+    private let delivery: DVSMReliableDelivery
+
+    public init(
+        backend: DVSMTransportBackend,
+        peers: DVSMPeerDirectory,
+        delivery: DVSMReliableDelivery
+    ) {
+        self.backend = backend
+        self.peers = peers
+        self.delivery = delivery
+    }
+
+    public func broadcast(
+        payload: Data,
+        shardID: String,
+        epoch: UInt64
+    ) async throws {
+
+        let frame = DVSMTransportFrame(
+            frameID: UUID().uuidString,
+            sourceNode: "local",
+            destinationNode: nil,
+            shardID: shardID,
+            epoch: epoch,
+            payload: payload,
+            timestamp: UInt64(Date().timeIntervalSince1970)
+        )
+
+        let allPeers = peers.allPeers().map { $0.nodeID }
+
+        try await backend.broadcast(frame, to: allPeers)
+
+        delivery.track(frame.frameID)
+    }
+
+    public func send(
+        payload: Data,
+        to nodeID: String,
+        shardID: String,
+        epoch: UInt64
+    ) async throws {
+
+        let frame = DVSMTransportFrame(
+            frameID: UUID().uuidString,
+            sourceNode: "local",
+            destinationNode: nodeID,
+            shardID: shardID,
+            epoch: epoch,
+            payload: payload,
+            timestamp: UInt64(Date().timeIntervalSince1970)
+        )
+
+        try await backend.send(frame)
+        delivery.track(frame.frameID)
+    }
+}
+
+// =====================================================
+// MARK: - EPOCH SYNCHRONIZATION CHANNEL
+// =====================================================
+
+public actor DVSMEpochSyncChannel {
+
+    private var currentEpoch: UInt64 = 0
+
+    public init() {}
+
+    public func advance(to epoch: UInt64) {
+        currentEpoch = max(currentEpoch, epoch)
+    }
+
+    public func get() -> UInt64 {
+        currentEpoch
+    }
+}
+
+// =====================================================
+// MARK: - SHARD ROUTING FABRIC
+// =====================================================
+
+public struct DVSMShardTransportMap {
+
+    public init() {}
+
+    public func resolveShard(_ shardID: String) -> String {
+        return "route:\(shardID)"
+    }
+}
+
+// =====================================================
+// MARK: - DTL CORE ENGINE
+// =====================================================
+
+public actor DVSMTransportLayer {
+
+    private let gossip: DVSMGossipEngine
+    private let epochSync: DVSMEpochSyncChannel
+    private let router = DVSMTransportRouter()
+
+    public init(
+        gossip: DVSMGossipEngine,
+        epochSync: DVSMEpochSyncChannel
+    ) {
+        self.gossip = gossip
+        self.epochSync = epochSync
+    }
+
+    // =====================================================
+    // MARK: - PRIMARY TRANSPORT INGEST
+    // =====================================================
+
+    public func ingest(
+        payload: Data,
+        shardID: String,
+        epoch: UInt64,
+        strategy: DVSMGossipStrategy
+    ) async throws {
+
+        let route = router.route(
+            frame: DVSMTransportFrame(
+                frameID: UUID().uuidString,
+                sourceNode: "local",
+                destinationNode: nil,
+                shardID: shardID,
+                epoch: epoch,
+                payload: payload,
+                timestamp: UInt64(Date().timeIntervalSince1970)
+            ),
+            strategy: strategy
+        )
+
+        switch strategy {
+
+        case .flood, .shardLocal, .epochScoped, .quorumBound:
+            try await gossip.broadcast(
+                payload: payload,
+                shardID: shardID,
+                epoch: epoch
+            )
+        }
+
+        epochSync.advance(to: epoch)
+
+        _ = route // reserved for future routing optimizations
+    }
+}
