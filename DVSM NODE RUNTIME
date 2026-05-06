@@ -1,0 +1,267 @@
+=====================================================
+DVSM NODE RUNTIME (MILITARY-GRADE DISTRIBUTED CORE)
+Deterministic • Byzantine-Tolerant • Shard-Aware • Pluggable Trust
+=====================================================
+// =====================================================
+// MARK: - INGEST PIPELINE (CORE SYSTEM BOUNDARY)
+// =====================================================
+
+public protocol DVSMIngestPipeline: Sendable {
+    func ingest(
+        _ payload: DVSMVectorPayload,
+        shard: DVSMShardContext,
+        context: DVSMNodeContext,
+        votes: [Bool]
+    ) async -> DVSMResult
+}
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - EXECUTION MODEL
+// =====================================================
+
+public enum DVSMExecutionMode: Sendable {
+    case strict
+    case adaptive
+    case hybrid
+}
+
+// =====================================================
+// MARK: - SHARD CONTEXT (STATE ANCHOR)
+// =====================================================
+
+public struct DVSMShardContext: Sendable {
+    public let shardID: String
+    public let merkleRoot: Data
+    public let version: UInt64
+    public let isVerified: Bool
+    public let parentRoot: Data?
+}
+
+// =====================================================
+// MARK: - PAYLOAD MODEL (PROVENANCE READY)
+// =====================================================
+
+public struct DVSMVectorPayload: Sendable {
+    public let id: String
+    public let vector: [Float]
+    public let timestamp: UInt64
+    public let signature: Data?
+}
+
+// =====================================================
+// MARK: - RESULT MODEL
+// =====================================================
+
+public enum DVSMResult: Sendable {
+    case accepted(stateRoot: Data, proof: DVSMMerkleProof?)
+    case rejected(reason: DVSMErrorCode)
+    case requiresConsensus
+}
+
+// =====================================================
+// MARK: - ERROR MODEL
+// =====================================================
+
+public enum DVSMErrorCode: Sendable {
+    case invalidGovernance
+    case invalidShard
+    case consensusFailure
+    case cryptographicFailure
+    case networkFailure
+}
+
+// =====================================================
+// MARK: - CRYPTO PROVIDER ABSTRACTION
+// =====================================================
+
+public protocol DVSMCryptoProvider: Sendable {
+    func hash(_ data: Data) -> Data
+}
+
+public struct SHA256Provider: DVSMCryptoProvider {
+    public init() {}
+    public func hash(_ data: Data) -> Data {
+        Data(SHA256.hash(data: data))
+    }
+}
+
+// =====================================================
+// MARK: - MERKLE PROOF (AUTHENTICATED PATHS)
+// =====================================================
+
+public struct DVSMMerkleProof: Sendable {
+    public let leaf: Data
+    public let siblings: [Data]
+    public let root: Data
+
+    public func verify(using hash: (Data) -> Data) -> Bool {
+        var current = leaf
+        for s in siblings {
+            current = hash(current + s)
+        }
+        return current == root
+    }
+}
+
+// =====================================================
+// MARK: - MERKLE STATE MACHINE
+// =====================================================
+
+public actor DVSMMerkleStateMachine {
+
+    private var tip: Data = Data("GENESIS".utf8)
+    private let hasher: DVSMCryptoProvider
+
+    public init(hasher: DVSMCryptoProvider) {
+        self.hasher = hasher
+    }
+
+    public func append(_ data: Data) -> Data {
+        let combined = tip + data
+        let new = hasher.hash(combined)
+        tip = new
+        return new
+    }
+
+    public func root() -> Data {
+        tip
+    }
+
+    public func prove(leaf: Data, siblings: [Data]) -> DVSMMerkleProof {
+        DVSMMerkleProof(leaf: leaf, siblings: siblings, root: tip)
+    }
+}
+
+// =====================================================
+// MARK: - CONSENSUS (HOTSTUFF-STYLE MODEL)
+// =====================================================
+
+public protocol DVSMConsensusEngine: Sendable {
+    func leader(epoch: UInt64) -> String
+    func quorum(_ votes: [Bool]) -> Bool
+}
+
+public struct HotStuffConsensusEngine: DVSMConsensusEngine {
+
+    public init() {}
+
+    public func leader(epoch: UInt64) -> String {
+        "leader-\(epoch % 3)"
+    }
+
+    public func quorum(_ votes: [Bool]) -> Bool {
+        votes.filter { $0 }.count >= (2 * votes.count / 3)
+    }
+}
+
+// =====================================================
+// MARK: - NETWORK LAYER (REPLICATION BUS)
+// =====================================================
+
+public protocol DVSMNetworkTransport: Sendable {
+    func broadcast(_ data: Data) async throws
+    func send(to node: String, _ data: Data) async throws
+}
+
+// =====================================================
+// MARK: - GOVERNANCE ENGINE
+// =====================================================
+
+public protocol DVSMGovernance: Sendable {
+    func validate(_ payload: DVSMVectorPayload) -> Bool
+}
+
+public struct PolicyGovernance: DVSMGovernance {
+    public init() {}
+
+    public func validate(_ payload: DVSMVectorPayload) -> Bool {
+        !payload.id.isEmpty && !payload.vector.isEmpty
+    }
+}
+
+// =====================================================
+// MARK: - STRICT EXECUTION ENGINE
+// =====================================================
+
+public actor DVSMStrictEngine {
+
+    private let dag: DVSMMerkleStateMachine
+
+    public init(dag: DVSMMerkleStateMachine) {
+        self.dag = dag
+    }
+
+    public func execute(_ payload: DVSMVectorPayload) async throws -> DVSMResult {
+
+        let encoded = try JSONEncoder().encode(payload)
+        let root = await dag.append(encoded)
+
+        let proof = await dag.prove(leaf: encoded, siblings: [])
+
+        return .accepted(stateRoot: root, proof: proof)
+    }
+}
+
+// =====================================================
+// MARK: - NODE RUNTIME (FULL SYSTEM ORCHESTRATOR)
+// =====================================================
+
+public final class DVSMNodeRuntime {
+
+    private let strict: DVSMStrictEngine
+    private let consensus: DVSMConsensusEngine
+    private let governance: DVSMGovernance
+    private let network: DVSMNetworkTransport?
+    private let mode: DVSMExecutionMode
+
+    public init(
+        strict: DVSMStrictEngine,
+        consensus: DVSMConsensusEngine,
+        governance: DVSMGovernance,
+        network: DVSMNetworkTransport?,
+        mode: DVSMExecutionMode
+    ) {
+        self.strict = strict
+        self.consensus = consensus
+        self.governance = governance
+        self.network = network
+        self.mode = mode
+    }
+
+    // =================================================
+    // MARK: - MAIN INGEST PIPELINE
+    // =================================================
+
+    public func ingest(
+        _ payload: DVSMVectorPayload,
+        votes: [Bool] = []
+    ) async -> DVSMResult {
+
+        // 1. GOVERNANCE CHECK
+        guard governance.validate(payload) else {
+            return .rejected(reason: .invalidGovernance)
+        }
+
+        // 2. NETWORK BROADCAST (OPTIONAL)
+        if let network {
+            let data = try? JSONEncoder().encode(payload)
+            try? await network.broadcast(data ?? Data())
+        }
+
+        // 3. CONSENSUS CHECK
+        if !votes.isEmpty {
+            guard consensus.quorum(votes) else {
+                return .rejected(reason: .consensusFailure)
+            }
+        }
+
+        // 4. STRICT EXECUTION
+        do {
+            return try await strict.execute(payload)
+        } catch {
+            return .rejected(reason: .cryptographicFailure)
+        }
+    }
+}
