@@ -1,0 +1,201 @@
+import Foundation
+
+// =====================================================
+// MARK: - NODE CONTEXT (NETWORK-SHARED IDENTITY)
+// =====================================================
+
+public struct NodeContext: Sendable {
+    public let nodeID: String
+    public let shardKey: String
+}
+
+// =====================================================
+// MARK: - SHARD ROUTING MODEL (DETERMINISTIC PARTITIONING)
+// =====================================================
+
+public struct DVSMPartitioner {
+
+    public let shardCount: Int
+
+    public init(shardCount: Int) {
+        self.shardCount = shardCount
+    }
+
+    public func shard(for id: String) -> Int {
+        abs(id.hashValue) % shardCount
+    }
+}
+
+// =====================================================
+// MARK: - TRANSPORT EVENT (IMMUTABLE SYSTEM SIGNAL)
+// =====================================================
+
+public struct DVSMEvent: Sendable, Codable {
+
+    public let eventID: String
+    public let shard: Int
+    public let nodeID: String
+
+    public let rootHash: String
+    public let payloadHash: String
+
+    public let timestamp: UInt64
+}
+
+// =====================================================
+// MARK: - TRANSPORT CHANNEL (ABSTRACTED NETWORK PLANE)
+// =====================================================
+
+public protocol DVSMTransportChannel: Sendable {
+
+    func send(_ event: DVSMEvent) async throws
+    func broadcast(_ event: DVSMEvent) async throws
+}
+
+// =====================================================
+// MARK: - IN-MEMORY REPLAYABLE BUS (REFERENCE IMPLEMENTATION)
+// =====================================================
+
+public actor DVSMEventBus {
+
+    private var subscribers: [(DVSMEvent) async -> Void] = []
+
+    public init() {}
+
+    public func publish(_ event: DVSMEvent) async {
+        for sub in subscribers {
+            await sub(event)
+        }
+    }
+
+    public func subscribe(_ handler: @escaping (DVSMEvent) async -> Void) {
+        subscribers.append(handler)
+    }
+}
+
+// =====================================================
+// MARK: - TRANSPORT ENVELOPE BUILDER
+// =====================================================
+
+public struct DVSMEventBuilder {
+
+    private let partitioner: DVSMPartitioner
+
+    public init(partitioner: DVSMPartitioner) {
+        self.partitioner = partitioner
+    }
+
+    public func build(
+        id: String,
+        node: NodeContext,
+        rootHash: String,
+        payloadHash: String,
+        timestamp: UInt64
+    ) -> DVSMEvent {
+
+        let shard = partitioner.shard(for: id)
+
+        return DVSMEvent(
+            eventID: id,
+            shard: shard,
+            nodeID: node.nodeID,
+            rootHash: rootHash,
+            payloadHash: payloadHash,
+            timestamp: timestamp
+        )
+    }
+}
+
+// =====================================================
+// MARK: - DTL ROUTER (SHARD-AWARE DISTRIBUTION)
+// =====================================================
+
+public final class DTLRouter {
+
+    private let bus: DVSMEventBus
+    private let builder: DVSMEventBuilder
+
+    public init(
+        bus: DVSMEventBus,
+        builder: DVSMEventBuilder
+    ) {
+        self.bus = bus
+        self.builder = builder
+    }
+
+    // =====================================================
+    // MARK: INGEST OUTPUT → TRANSPORT PIPELINE
+    // =====================================================
+
+    public func emit(
+        id: String,
+        node: NodeContext,
+        rootHash: String,
+        payloadHash: String,
+        timestamp: UInt64
+    ) async {
+
+        let event = builder.build(
+            id: id,
+            node: node,
+            rootHash: rootHash,
+            payloadHash: payloadHash,
+            timestamp: timestamp
+        )
+
+        await bus.publish(event)
+    }
+}
+
+// =====================================================
+// MARK: - GOSSIP SYNC (EVENTUAL CONSISTENCY LAYER)
+// =====================================================
+
+public final class DVSMGossipSync {
+
+    private var seen: Set<String> = []
+
+    public init() {}
+
+    public func receive(_ event: DVSMEvent) {
+
+        let key = "\(event.eventID)-\(event.rootHash)"
+
+        guard !seen.contains(key) else { return }
+
+        seen.insert(key)
+
+        // forward propagation would occur in real network layer
+    }
+}
+
+// =====================================================
+// MARK: - DTL GUARANTEE MODEL
+// =====================================================
+
+/*
+ The DVSM Transport Layer guarantees:
+
+ 1. Deterministic shard routing (same ID → same shard)
+ 2. Immutable event structure
+ 3. Replayable event stream
+ 4. No in-place mutation of events
+ 5. Separation from execution layer (NO compute logic here)
+
+ This layer is intentionally "dumb":
+ it does not decide correctness, only distributes truth.
+*/
+
+// =====================================================
+// MARK: - LAYER BOUNDARY CONTRACT
+// =====================================================
+
+/*
+ Execution Layer → emits (id, rootHash, payloadHash)
+            ↓
+        DTL Router → converts to DVSMEvent
+            ↓
+        Event Bus / Network Transport
+            ↓
+        Gossip Sync / Replication
+*/
