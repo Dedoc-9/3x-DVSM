@@ -1,0 +1,258 @@
+import Foundation
+
+// =====================================================
+// MARK: - EXECUTION MODE (DETERMINISM CONTROL PLANE)
+// =====================================================
+
+public enum DVSMExecutionMode: Sendable {
+    case strict        // fully deterministic, replayable
+    case hybrid        // deterministic + bounded noise
+    case adaptive      // probabilistic execution (non-authoritative)
+}
+
+// =====================================================
+// MARK: - NODE CONTEXT (DTL SHARD COMPATIBLE)
+// =====================================================
+
+public struct NodeContext: Sendable {
+    public let nodeID: String
+    public let shardKey: String
+}
+
+// =====================================================
+// MARK: - TRUST ZONE (AUDIT + ROUTING ONLY)
+// =====================================================
+
+public enum TrustZone: Sendable {
+    case ingest
+    case execution
+    case consensus
+    case persistence
+    case audit
+}
+
+// =====================================================
+// MARK: - EXTERNAL LAYER BRIDGES (CCL / PSRL / DTL)
+// =====================================================
+
+public protocol DVSMConsensusBridge: Sendable {
+    func validateCommit(id: String, root: String) -> Bool
+}
+
+public protocol DVSMPersistenceBridge: Sendable {
+    func store(id: String, payload: Data, root: String) async throws
+}
+
+public protocol DVSMCryptoBridge: Sendable {
+    func hash(_ data: Data) -> String
+}
+
+// =====================================================
+// MARK: - OPTIONAL ADVANCED CRYPTO HOOKS (FUTURE LAYERS)
+// =====================================================
+
+public protocol DVSMZKVerifier: Sendable {
+    func verify(proof: Data) -> Bool
+}
+
+public protocol DVSMBLSAggregator: Sendable {
+    func aggregate(signatures: [Data]) -> Data
+}
+
+// =====================================================
+// MARK: - POLICY ENGINE (LOCAL GATE ONLY)
+// =====================================================
+
+public struct DVSMPolicy {
+
+    public let maxInstability: Float
+    public let minConfidence: Float
+    public let minReliability: Float
+
+    public func evaluate(
+        instability: Float,
+        confidence: Float,
+        reliability: Float
+    ) -> Bool {
+
+        if instability > maxInstability * 1.5 { return false }
+        if confidence < minConfidence { return false }
+        if reliability < minReliability { return false }
+
+        return true
+    }
+}
+
+// =====================================================
+// MARK: - MANIFOLD PROJECTION (EXECUTION SPACE ONLY)
+// =====================================================
+
+public struct ManifoldProjection {
+
+    public func project(_ vector: [Float], mode: DVSMExecutionMode) -> [Float] {
+
+        switch mode {
+
+        case .strict:
+            return vector
+
+        case .hybrid:
+            return vector.map { $0 + 0.001 }
+
+        case .adaptive:
+            return vector.map { $0 + Float.random(in: -0.01...0.01) }
+        }
+    }
+}
+
+// =====================================================
+// MARK: - DETERMINISTIC RNG (HYBRID ONLY)
+// =====================================================
+
+public struct DVSMRNG {
+    private var seed: UInt64
+
+    public init(seed: UInt64) {
+        self.seed = seed
+    }
+
+    public mutating func next() -> Float {
+        seed = seed &* 6364136223846793005 &+ 1
+        let x = Float((seed >> 16) & 0xFFFF)
+        return (x / 65535.0 - 0.5) * 0.01
+    }
+}
+
+// =====================================================
+// MARK: - DVSM EXECUTION ENGINE v3 (INGEST PRIMARY)
+// =====================================================
+
+public final class DVSMExecutionEngine {
+
+    private let mode: DVSMExecutionMode
+    private let policy: DVSMPolicy
+
+    private let crypto: DVSMCryptoBridge
+    private let consensus: DVSMConsensusBridge
+    private let persistence: DVSMPersistenceBridge
+
+    private let manifold = ManifoldProjection()
+    private var rng = DVSMRNG(seed: 0xDEADBEEF)
+    private var counter: UInt64 = 0
+
+    // Optional future hooks (non-breaking)
+    private let zk: DVSMZKVerifier?
+    private let bls: DVSMBLSAggregator?
+
+    // =====================================================
+    // MARK: INIT
+    // =====================================================
+
+    public init(
+        mode: DVSMExecutionMode,
+        policy: DVSMPolicy,
+        crypto: DVSMCryptoBridge,
+        consensus: DVSMConsensusBridge,
+        persistence: DVSMPersistenceBridge,
+        zk: DVSMZKVerifier? = nil,
+        bls: DVSMBLSAggregator? = nil
+    ) {
+        self.mode = mode
+        self.policy = policy
+        self.crypto = crypto
+        self.consensus = consensus
+        self.persistence = persistence
+        self.zk = zk
+        self.bls = bls
+    }
+
+    // =====================================================
+    // MARK: INGEST PIPELINE (PRIMARY ENTRY POINT)
+    // =====================================================
+
+    public func ingest(
+        id: String,
+        vector: [Float],
+        entropy: Float,
+        confidence: Float,
+        reliability: Float,
+        node: NodeContext,
+        zkProof: Data? = nil,
+        signatures: [Data]? = nil
+    ) async throws -> Bool {
+
+        counter += 1
+
+        // ---------------------------------------------
+        // 1. GOVERNANCE GATE (LOCAL ONLY)
+        // ---------------------------------------------
+        guard policy.evaluate(
+            instability: entropy,
+            confidence: confidence,
+            reliability: reliability
+        ) else {
+            return false
+        }
+
+        // ---------------------------------------------
+        // 2. OPTIONAL ZK VERIFICATION (NO EXEC IMPACT)
+        // ---------------------------------------------
+        if let zkProof, let zk {
+            guard zk.verify(proof: zkProof) else {
+                return false
+            }
+        }
+
+        // ---------------------------------------------
+        // 3. MANIFOLD TRANSFORM (EXECUTION LAYER)
+        // ---------------------------------------------
+        var working = manifold.project(vector, mode: mode)
+
+        if mode == .hybrid {
+            working = working.map { $0 + rng.next() }
+        }
+
+        // ---------------------------------------------
+        // 4. PAYLOAD ENVELOPE (PSRL COMPATIBLE)
+        // ---------------------------------------------
+        let payloadString = working.map { "\($0)" }.joined(separator: "|")
+        let payload = Data(payloadString.utf8)
+
+        var root = crypto.hash(payload)
+
+        // ---------------------------------------------
+        // 5. OPTIONAL BLS AGGREGATION (CCL UPGRADE PATH)
+        // ---------------------------------------------
+        if let signatures, let bls {
+            let aggregated = bls.aggregate(signatures: signatures)
+            root = crypto.hash(aggregated)
+        }
+
+        // ---------------------------------------------
+        // 6. CONSENSUS VALIDATION (CCL LAYER)
+        // ---------------------------------------------
+        let accepted = consensus.validateCommit(id: id, root: root)
+        guard accepted else {
+            return false
+        }
+
+        // ---------------------------------------------
+        // 7. PERSISTENCE (PSRL LAYER)
+        // ---------------------------------------------
+        try await persistence.store(
+            id: id,
+            payload: payload,
+            root: root
+        )
+
+        return true
+    }
+
+    // =====================================================
+    // MARK: TRACE (DUMEgov COMPATIBLE)
+    // =====================================================
+
+    public func ingestCount() -> UInt64 {
+        counter
+    }
+}
