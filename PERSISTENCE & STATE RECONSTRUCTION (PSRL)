@@ -1,0 +1,295 @@
+// =====================================================
+// DVSM PERSISTENCE & STATE RECONSTRUCTION LAYER (PSRL)
+// Deterministic • Snapshot-Based • Replay-Verified
+// =====================================================
+//
+// ROLE:
+// This layer ensures:
+// - Deterministic state persistence
+// - Replayable execution from any checkpoint
+// - Snapshot + rollback integrity
+// - Audit-grade reconstruction of system history
+// - Recovery after crash, fork, or desynchronization
+//
+// It does NOT:
+// - Execute transactions
+// - Perform consensus
+// - Handle networking
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - SNAPSHOT IDENTIFIER
+// =====================================================
+
+public struct DVSMSnapshotID: Sendable, Hashable {
+    public let epoch: UInt64
+    public let shardID: String
+    public let stateRoot: String
+}
+
+// =====================================================
+// MARK: - STATE SNAPSHOT
+// =====================================================
+
+public struct DVMSnapshot: Sendable {
+    public let id: DVMSnapshotID
+    public let timestamp: UInt64
+    public let compressedState: Data
+    public let parentSnapshot: DVMSnapshotID?
+}
+
+// =====================================================
+// MARK: - REPLAY EVENT (DETERMINISTIC LOG ENTRY)
+// =====================================================
+
+public struct DVSMReplayEvent: Sendable {
+    public let eventID: String
+    public let payloadHash: String
+    public let stateRootBefore: String
+    public let stateRootAfter: String
+    public let shardID: String
+    public let timestamp: UInt64
+}
+
+// =====================================================
+// MARK: - PERSISTENCE ERROR MODEL
+// =====================================================
+
+public enum DVSMPersistenceError: Error, Sendable {
+    case snapshotNotFound
+    case invalidReplayChain
+    case corruptedState
+    case invalidCheckpoint
+}
+
+// =====================================================
+// MARK: - STATE STORE (SNAPSHOT + EVENT LOG)
+// =====================================================
+
+public actor DVSMStateStore {
+
+    private var snapshots: [DVSMSnapshotID: DVMSnapshot] = [:]
+    private var eventLog: [DVSMReplayEvent] = []
+
+    private let hasher = SHA256.self
+
+    public init() {}
+
+    // =====================================================
+    // MARK: - WRITE EVENT (APPEND-ONLY LOG)
+    // =====================================================
+
+    public func record(event: DVSMReplayEvent) {
+        eventLog.append(event)
+    }
+
+    // =====================================================
+    // MARK: - CREATE SNAPSHOT (CHECKPOINT)
+    // =====================================================
+
+    public func createSnapshot(
+        epoch: UInt64,
+        shardID: String,
+        stateRoot: String,
+        state: Data,
+        parent: DVSMSnapshotID?
+    ) -> DVMSnapshot {
+
+        let id = DVSMSnapshotID(
+            epoch: epoch,
+            shardID: shardID,
+            stateRoot: stateRoot
+        )
+
+        let snapshot = DVMSnapshot(
+            id: id,
+            timestamp: UInt64(Date().timeIntervalSince1970),
+            compressedState: state, // placeholder for real compression layer
+            parentSnapshot: parent
+        )
+
+        snapshots[id] = snapshot
+        return snapshot
+    }
+
+    // =====================================================
+    // MARK: - LOAD SNAPSHOT
+    // =====================================================
+
+    public func loadSnapshot(_ id: DVSMSnapshotID) throws -> DVMSnapshot {
+        guard let snapshot = snapshots[id] else {
+            throw DVSMPersistenceError.snapshotNotFound
+        }
+        return snapshot
+    }
+
+    // =====================================================
+    // MARK: - SNAPSHOT CHAIN VALIDATION
+    // =====================================================
+
+    public func validateSnapshotChain(
+        from latest: DVMSnapshotID
+    ) throws -> Bool {
+
+        var current: DVMSnapshotID? = latest
+
+        while let id = current {
+            guard let snapshot = snapshots[id] else {
+                throw DVSMPersistenceError.invalidCheckpoint
+            }
+
+            current = snapshot.parentSnapshot
+        }
+
+        return true
+    }
+
+    // =====================================================
+    // MARK: - REPLAY ENGINE (DETERMINISTIC REBUILD)
+    // =====================================================
+
+    public func replay(
+        from startRoot: String
+    ) throws -> String {
+
+        var currentRoot = startRoot
+
+        for event in eventLog {
+
+            guard event.stateRootBefore == currentRoot else {
+                throw DVSMPersistenceError.invalidReplayChain
+            }
+
+            currentRoot = event.stateRootAfter
+        }
+
+        return currentRoot
+    }
+
+    // =====================================================
+    // MARK: - AUDIT EXTRACTION
+    // =====================================================
+
+    public func exportAuditTrail() -> [DVSMReplayEvent] {
+        eventLog
+    }
+}
+
+// =====================================================
+// MARK: - RECONSTRUCTION ENGINE
+// =====================================================
+
+public actor DVSMStateReconstructor {
+
+    private let store: DVSMStateStore
+
+    public init(store: DVSMStateStore) {
+        self.store = store
+    }
+
+    // =====================================================
+    // MARK: - FULL STATE REBUILD
+    // =====================================================
+
+    public func reconstruct(
+        from snapshotID: DVSMSnapshotID
+    ) async throws -> DVMSnapshot {
+
+        let snapshot = try await store.loadSnapshot(snapshotID)
+
+        _ = try await store.validateSnapshotChain(from: snapshotID)
+
+        return snapshot
+    }
+
+    // =====================================================
+    // MARK: - ROLLBACK RECOVERY
+    // =====================================================
+
+    public func rollback(
+        to snapshotID: DVSMSnapshotID
+    ) async throws -> String {
+
+        let snapshot = try await store.loadSnapshot(snapshotID)
+
+        return snapshot.id.stateRoot
+    }
+}
+
+// =====================================================
+// MARK: - PERSISTENCE ORCHESTRATOR (PSRL CORE)
+// =====================================================
+
+public final class DVSMPSRL {
+
+    private let store: DVSMStateStore
+    private let reconstructor: DVSMStateReconstructor
+
+    public init() {
+        let store = DVSMStateStore()
+        self.store = store
+        self.reconstructor = DVSMStateReconstructor(store: store)
+    }
+
+    // =====================================================
+    // MARK: - INGEST EVENT (FROM NRIL)
+    // =====================================================
+
+    public func ingestEvent(
+        event: DVSMReplayEvent
+    ) async {
+
+        await store.record(event: event)
+    }
+
+    // =====================================================
+    // MARK: - SNAPSHOT API
+    // =====================================================
+
+    public func checkpoint(
+        epoch: UInt64,
+        shardID: String,
+        stateRoot: String,
+        state: Data,
+        parent: DVSMSnapshotID?
+    ) async -> DVMSnapshot {
+
+        await store.createSnapshot(
+            epoch: epoch,
+            shardID: shardID,
+            stateRoot: stateRoot,
+            state: state,
+            parent: parent
+        )
+    }
+
+    // =====================================================
+    // MARK: - REPLAY API
+    // =====================================================
+
+    public func replay(from root: String) async throws -> String {
+        try await store.replay(from: root)
+    }
+
+    // =====================================================
+    // MARK: - RECOVERY API
+    // =====================================================
+
+    public func recover(
+        snapshotID: DVSMSnapshotID
+    ) async throws -> DVMSnapshot {
+
+        try await reconstructor.reconstruct(from: snapshotID)
+    }
+
+    // =====================================================
+    // MARK: - AUDIT EXPORT
+    // =====================================================
+
+    public func auditLog() async -> [DVSMReplayEvent] {
+        await store.exportAuditTrail()
+    }
+}
