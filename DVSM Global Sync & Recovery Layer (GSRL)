@@ -1,0 +1,226 @@
+// =====================================================
+// DVSM GLOBAL SYNC & RECOVERY LAYER (GSRL)
+// Global Convergence • Fault Recovery • Epoch Sync
+// =====================================================
+//
+// ROLE:
+// This layer ensures:
+// - Cross-node state synchronization
+// - Fork detection and reconciliation
+// - Epoch alignment across shards
+// - Recovery coordination after failures
+// - Global consistency convergence
+//
+// It does NOT:
+// - Execute transactions
+// - Perform consensus voting
+// - Store persistent state
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - NODE STATE VIEW
+// =====================================================
+
+public struct DVSMNodeState: Sendable {
+    public let nodeID: String
+    public let shardID: String
+    public let epoch: UInt64
+    public let stateRoot: String
+}
+
+// =====================================================
+// MARK: - SYNC EVENT
+// =====================================================
+
+public struct DVSMSyncEvent: Sendable {
+    public let eventID: String
+    public let sourceNode: String
+    public let targetNode: String
+    public let shardID: String
+    public let stateRoot: String
+    public let timestamp: UInt64
+}
+
+// =====================================================
+// MARK: - RECOVERY RESULT
+// =====================================================
+
+public enum DVSMRecoveryResult: Sendable {
+    case aligned(epoch: UInt64, root: String)
+    case divergent(reason: String)
+    case requiresRollback(targetRoot: String)
+}
+
+// =====================================================
+// MARK: - GLOBAL VIEW STATE (IN-MEMORY COORDINATION ONLY)
+// =====================================================
+
+public actor DVSMGlobalView {
+
+    private var nodeStates: [String: DVSMNodeState] = [:]
+
+    public init() {}
+
+    public func update(_ state: DVSMNodeState) {
+        nodeStates[state.nodeID] = state
+    }
+
+    public func snapshot() -> [DVSMNodeState] {
+        Array(nodeStates.values)
+    }
+
+    public func state(for nodeID: String) -> DVSMNodeState? {
+        nodeStates[nodeID]
+    }
+}
+
+// =====================================================
+// MARK: - FORK DETECTOR
+// =====================================================
+
+public struct DVSMForkDetector {
+
+    public init() {}
+
+    public func detect(_ states: [DVSMNodeState]) -> Bool {
+        guard let first = states.first else { return false }
+
+        return states.contains {
+            $0.stateRoot != first.stateRoot || $0.epoch != first.epoch
+        }
+    }
+}
+
+// =====================================================
+// MARK: - RECONCILIATION ENGINE
+// =====================================================
+
+public struct DVSMReconciliationEngine {
+
+    public init() {}
+
+    public func resolve(states: [DVSMNodeState]) -> DVSMRecoveryResult {
+
+        guard let reference = states.first else {
+            return .divergent(reason: "No nodes available")
+        }
+
+        let divergence = states.contains {
+            $0.stateRoot != reference.stateRoot
+        }
+
+        if divergence {
+            // choose most recent epoch as recovery anchor
+            let latest = states.max(by: { $0.epoch < $1.epoch })!
+
+            return .requiresRollback(targetRoot: latest.stateRoot)
+        }
+
+        return .aligned(epoch: reference.epoch, root: reference.stateRoot)
+    }
+}
+
+// =====================================================
+// MARK: - EPOCH ALIGNER
+// =====================================================
+
+public struct DVSMEpochAligner {
+
+    public init() {}
+
+    public func align(_ states: [DVSMNodeState]) -> UInt64 {
+        states.map { $0.epoch }.min() ?? 0
+    }
+}
+
+// =====================================================
+// MARK: - GLOBAL SYNC ENGINE (CORE GSRL)
+// =====================================================
+
+public actor DVSMGlobalSyncEngine {
+
+    private let view: DVSMGlobalView
+    private let detector = DVSMForkDetector()
+    private let recon = DVSMReconciliationEngine()
+    private let aligner = DVSMEpochAligner()
+
+    public init(view: DVSMGlobalView) {
+        self.view = view
+    }
+
+    // =====================================================
+    // MARK: - NODE UPDATE INGESTION
+    // =====================================================
+
+    public func ingest(state: DVSMNodeState) async {
+        await view.update(state)
+    }
+
+    // =====================================================
+    // MARK: - GLOBAL CONSISTENCY CHECK
+    // =====================================================
+
+    public func evaluate() async -> DVSMRecoveryResult {
+
+        let states = await view.snapshot()
+
+        let forked = detector.detect(states)
+
+        if forked {
+            return recon.resolve(states: states)
+        }
+
+        let epoch = aligner.align(states)
+        let root = states.first?.stateRoot ?? "GENESIS"
+
+        return .aligned(epoch: epoch, root: root)
+    }
+
+    // =====================================================
+    // MARK: - FORCED RESYNC (RECOVERY ENTRYPOINT)
+    // =====================================================
+
+    public func resync() async -> DVSMRecoveryResult {
+        await evaluate()
+    }
+}
+
+// =====================================================
+// MARK: - GLOBAL RECOVERY ORCHESTRATOR
+// =====================================================
+
+public final class DVSMGlobalRecoveryLayer {
+
+    private let engine: DVSMGlobalSyncEngine
+
+    public init(engine: DVSMGlobalSyncEngine) {
+        self.engine = engine
+    }
+
+    // =====================================================
+    // MARK: - NODE REPORTING API
+    // =====================================================
+
+    public func report(state: DVSMNodeState) async {
+        await engine.ingest(state: state)
+    }
+
+    // =====================================================
+    // MARK: - GLOBAL STABILITY CHECK
+    // =====================================================
+
+    public func check() async -> DVSMRecoveryResult {
+        await engine.evaluate()
+    }
+
+    // =====================================================
+    // MARK: - EMERGENCY RESYNC
+    // =====================================================
+
+    public func recover() async -> DVSMRecoveryResult {
+        await engine.resync()
+    }
+}
